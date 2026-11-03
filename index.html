@@ -15,23 +15,61 @@
 <script>
 const pages=['inicio','votacion','confirmacion','resultados'];let timer=null,busy=false,adminAction='resultados';let ultimoResultado=null;
 function show(id){pages.forEach(p=>document.getElementById(p).classList.toggle('hidden',p!==id));window.scrollTo(0,0)}
-async function api(url,options={}){
- const key='barrantinas_votos_demo_2026';
- const get=()=>JSON.parse(localStorage.getItem(key)||'{"carla":0,"shirley":0,"blanco":0}');
- const save=v=>localStorage.setItem(key,JSON.stringify(v));
- const pass='010987';
- if(url==='/api/votar') {const option=JSON.parse(options.body).opcion;if(!['carla','shirley','blanco'].includes(option))throw Error('Opción inválida');const v=get();v[option]++;save(v);return {ok:true}}
- if(url==='/api/admin/login'){if(JSON.parse(options.body).password!==pass)throw Error('Contraseña incorrecta');sessionStorage.setItem('barrantinas_admin','1');return {ok:true}}
- if(url==='/api/admin/logout'){sessionStorage.removeItem('barrantinas_admin');return {ok:true}}
- if(url==='/api/resultados'){if(sessionStorage.getItem('barrantinas_admin')!=='1')throw Error('Acceso no autorizado');const v=get();return {total:Object.values(v).reduce((a,b)=>a+b,0),resultados:[{nombre:'TATIANA ABIGAIL VASQUEZ MAMANI',votos:v.carla},{nombre:'DAVID ALEXANDER FERNANDEZ MEZA',votos:v.shirley},{nombre:'VOTO EN BLANCO',votos:v.blanco}]}}
- if(url==='/api/reiniciar'){if(sessionStorage.getItem('barrantinas_admin')!=='1')throw Error('Acceso no autorizado');save({carla:0,shirley:0,blanco:0});return {ok:true}}
- throw Error('Operación no disponible')
+// Configuración pública de Supabase. Nunca colocar aquí una secret key.
+const SUPABASE_URL = 'https://gqqonvhyntcvoipnrccp.supabase.co';
+const SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_CuHGtdYR_I_TmEw2YH2nBA_Civ2H7Wp';
+let claveAdmin = null;
+let actualizadorResultados = null;
+async function rpc(nombre, parametros) {
+  if (SUPABASE_PUBLISHABLE_KEY.startsWith('PEGA_AQUI')) throw Error('Falta configurar la clave pública de Supabase.');
+  const respuesta = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${nombre}`, {
+    method: 'POST',
+    headers: {'apikey': SUPABASE_PUBLISHABLE_KEY, 'Content-Type': 'application/json'},
+    body: JSON.stringify(parametros)
+  });
+  let datos;
+  try { datos = await respuesta.json(); } catch { throw Error('Respuesta no válida de Supabase'); }
+  if (!respuesta.ok) throw Error(datos.message || `Error HTTP ${respuesta.status}`);
+  return datos;
 }
+async function api(url, options={}) {
+  const body = options.body ? JSON.parse(options.body) : {};
+  if (url === '/api/votar') return rpc('registrar_voto', {p_opcion: body.opcion});
+  if (url === '/api/admin/login') {
+    await rpc('verificar_clave', {p_clave: body.password});
+    claveAdmin = body.password; // Solo memoria, nunca localStorage ni sessionStorage
+    return {ok:true};
+  }
+  if (url === '/api/admin/logout') {claveAdmin = null; return {ok:true};}
+  if (!claveAdmin) throw Error('Acceso administrativo no autorizado');
+  if (url === '/api/resultados') return rpc('obtener_resultados', {p_clave: claveAdmin});
+  if (url === '/api/reiniciar') return rpc('reiniciar_eleccion', {p_clave: claveAdmin});
+  throw Error('Operación no disponible');
+}
+
 function speak(){if(!('speechSynthesis' in window))return; speechSynthesis.cancel();const u=new SpeechSynthesisUtterance('Has emitido tu voto correctamente, felicidades');u.lang='es-PE';u.rate=.85;u.volume=1;speechSynthesis.speak(u)}
 document.getElementById('irVotar').onclick=()=>show('votacion');
 document.querySelectorAll('[data-vote]').forEach(b=>b.onclick=async()=>{if(busy)return;busy=true;document.querySelectorAll('[data-vote]').forEach(x=>x.disabled=true);try{await api('/api/votar',{method:'POST',body:JSON.stringify({opcion:b.dataset.vote})});show('confirmacion');speak();let remaining=20;document.getElementById('contador').textContent=remaining;clearInterval(timer);timer=setInterval(()=>{remaining--;document.getElementById('contador').textContent=remaining;if(remaining<=0){clearInterval(timer);show('inicio');busy=false;document.querySelectorAll('[data-vote]').forEach(x=>x.disabled=false)}},1000)}catch(e){alert('No se pudo registrar el voto: '+e.message);busy=false;document.querySelectorAll('[data-vote]').forEach(x=>x.disabled=false)}});
 const dialog=document.getElementById('adminDialog');document.querySelectorAll('[data-admin]').forEach(b=>b.onclick=()=>{adminAction=b.dataset.admin;document.getElementById('adminTitulo').textContent=adminAction==='reiniciar'?'Reiniciar elección':adminAction==='informe'?'Clave para generar informe PDF':'Consultar resultados';document.getElementById('adminError').textContent='';document.getElementById('clave').value='';dialog.showModal();document.getElementById('clave').focus()});document.getElementById('cancelar').onclick=()=>dialog.close();
-document.getElementById('adminForm').onsubmit=async e=>{e.preventDefault();const error=document.getElementById('adminError');error.textContent='';try{await api('/api/admin/login',{method:'POST',body:JSON.stringify({password:document.getElementById('clave').value})});dialog.close();if(adminAction==='informe'){await generarInforme();await api('/api/admin/logout',{method:'POST'})}else if(adminAction==='reiniciar'){if(confirm('¿Confirmas que deseas eliminar TODOS los votos? Esta acción no se puede deshacer.')){await api('/api/reiniciar',{method:'POST'});alert('Conteo reiniciado correctamente.')}await api('/api/admin/logout',{method:'POST'})}else{const data=await api('/api/resultados');ultimoResultado=data;document.getElementById('total').textContent='Cantidad de votantes que emitieron su voto: '+data.total;const container=document.getElementById('barras');container.replaceChildren();data.resultados.forEach((x,i)=>{const percent=data.total?100*x.votos/data.total:0;const item=document.createElement('div');item.className='result';const name=document.createElement('div');name.textContent=`${x.nombre}: ${x.votos} voto(s) — ${percent.toFixed(1)} %`;const bar=document.createElement('div');bar.className='bar';const fill=document.createElement('div');fill.className='fill';fill.style.width=percent+'%';fill.style.background=['#138547','#1670c5','#8d96a0'][i];bar.append(fill);item.append(name,bar);container.append(item)});renderPie(data);show('resultados')}}catch(ex){error.textContent=ex.message;if(!dialog.open)alert(ex.message)}};
+document.getElementById('adminForm').onsubmit=async e=>{e.preventDefault();const error=document.getElementById('adminError');error.textContent='';try{await api('/api/admin/login',{method:'POST',body:JSON.stringify({password:document.getElementById('clave').value})});dialog.close();if(adminAction==='informe'){ultimoResultado=await api('/api/resultados');await generarInforme();await api('/api/admin/logout',{method:'POST'})}else if(adminAction==='reiniciar'){if(confirm('¿Confirmas que deseas eliminar TODOS los votos? Esta acción no se puede deshacer.')){await api('/api/reiniciar',{method:'POST'});alert('Conteo reiniciado correctamente.')}await api('/api/admin/logout',{method:'POST'})}else{const data=await api('/api/resultados');ultimoResultado=data;document.getElementById('total').textContent='Cantidad de votantes que emitieron su voto: '+data.total;const container=document.getElementById('barras');container.replaceChildren();data.resultados.forEach((x,i)=>{const percent=data.total?100*x.votos/data.total:0;const item=document.createElement('div');item.className='result';const name=document.createElement('div');name.textContent=`${x.nombre}: ${x.votos} voto(s) — ${percent.toFixed(1)} %`;const bar=document.createElement('div');bar.className='bar';const fill=document.createElement('div');fill.className='fill';fill.style.width=percent+'%';fill.style.background=['#138547','#1670c5','#8d96a0'][i];bar.append(fill);item.append(name,bar);container.append(item)});renderPie(data);show('resultados')}}catch(ex){error.textContent=ex.message;if(!dialog.open)alert(ex.message)}};
+async function actualizarResultadosEnPantalla(){
+ if(document.getElementById('resultados').classList.contains('hidden') || !claveAdmin) return;
+ try {
+  const data=await api('/api/resultados'); ultimoResultado=data;
+  document.getElementById('total').textContent='Cantidad de votantes que emitieron su voto: '+data.total;
+  const container=document.getElementById('barras'); container.replaceChildren();
+  data.resultados.forEach((x,i)=>{
+   const percent=data.total?100*x.votos/data.total:0;
+   const item=document.createElement('div');item.className='result';
+   const name=document.createElement('div');name.textContent=`${x.nombre}: ${x.votos} voto(s) — ${percent.toFixed(1)} %`;
+   const bar=document.createElement('div');bar.className='bar';
+   const fill=document.createElement('div');fill.className='fill';fill.style.width=percent+'%';fill.style.background=['#138547','#1670c5','#8d96a0'][i];
+   bar.append(fill);item.append(name,bar);container.append(item);
+  });
+  renderPie(data);
+ } catch(err) { console.error('No se pudieron actualizar los resultados:',err); }
+}
+actualizadorResultados=setInterval(actualizarResultadosEnPantalla,5000);
 document.getElementById('salirResultados').onclick=async()=>{await api('/api/admin/logout',{method:'POST'}).catch(()=>{});show('inicio')};
 
 const COLORS=['#138547','#1670c5','#8d96a0'];
